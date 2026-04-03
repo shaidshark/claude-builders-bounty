@@ -2,8 +2,25 @@
 """
 Pre-tool-use hook for Claude Code that blocks destructive bash commands.
 
-Install: cp pre-tool-use-block-destructive.py ~/.claude/hooks/pre-tool-use.py
-Config: Add to ~/.claude/hooks.json in the "PreToolUse" array.
+Install:
+  cp pre-tool-use-block-destructive.py ~/.claude/hooks/pre-tool-use.py
+
+Then add to ~/.claude/settings.json:
+  {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "python3 ~/.claude/hooks/pre-tool-use.py"
+            }
+          ]
+        }
+      ]
+    }
+  }
 
 Logs blocked attempts to ~/.claude/hooks/blocked.log
 """
@@ -17,27 +34,42 @@ from pathlib import Path
 
 LOG_FILE = Path.home() / ".claude" / "hooks" / "blocked.log"
 
+# Destructive patterns: (regex, description)
 DESTRUCTIVE_PATTERNS = [
-    (r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|-[a-zA-Z]*r[a-zA-Z]*\s+).*/", "rm -rf with path"),
+    # File system destruction
+    (r"\brm\s+(?:(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+)|(?:--recursive\s+|--force\s+)+)[^\s]", "rm with recursive/force flags"),
     (r"\brm\s+--recursive\s+--force\s+", "rm --recursive --force"),
+    # Database destruction
     (r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b", "DROP TABLE/DATABASE/SCHEMA"),
     (r"\bTRUNCATE\s+(TABLE\s+)?[a-zA-Z_]", "TRUNCATE table"),
-    (r"\bDELETE\s+FROM\b", "DELETE FROM"),
+    # DELETE FROM without WHERE clause
+    (r"\bDELETE\s+FROM\b(?!.*\bWHERE\b)", "DELETE FROM without WHERE clause"),
+    # Disk/format operations
     (r"\bmkfs\b", "mkfs (format filesystem)"),
     (r"\bdd\s+if=.*of=/dev/", "dd writing to device"),
+    (r"\bformat\s+[A-Z]:", "format drive"),
+    # System shutdown/reboot
     (r"\b(shutdown|reboot|halt|poweroff|init\s+[06])\b", "system shutdown/reboot"),
+    # Permission escalation
     (r"\bchmod\s+-R\s+(777|666)\s+/", "chmod -R 777/666 on root"),
-    (r"\bchown\s+-R\s+\w+\s+/", "chown -R on root"),
-    (r"\bgit\s+push\s+.*(--force|-f\b)", "git push --force"),
+    (r"\bchown\s+-R\s+\w+\s+/", "chown -R on root path"),
+    # Git force operations
+    (r"\bgit\s+push\s+.*(--force(?!\s*with-lease)|-f\b)", "git push --force"),
     (r"\bgit\s+clean\s+(-[a-zA-Z]*f|-fdx)", "git clean -f"),
+    # Docker destructive
     (r"\bdocker\s+(system\s+)?prune\b", "docker prune"),
     (r"\bdocker\s+rm\s+(-f|--force)", "docker rm --force"),
+    # Kubernetes destructive
     (r"\bkubectl\s+delete\s+namespace", "kubectl delete namespace"),
+    # Package uninstall global
     (r"\b(npm|pip)\s+uninstall\s+(-g|--global)", "global package uninstall"),
+    # Fork bomb
     (r":\(\)\{.*:\|:&\}", "fork bomb pattern"),
+    # Overwrite device
     (r">\s*/dev/sd[a-z]", "overwrite block device"),
 ]
 
+# Allowed commands whitelist (prefix matching)
 WHITELIST = [
     "rm -rf node_modules",
     "rm -rf __pycache__",
@@ -48,10 +80,21 @@ WHITELIST = [
     "rm -rf .turbo",
     "rm -rf coverage",
     "rm -rf .pytest_cache",
+    "rm -rf ./node_modules",
+    "rm -rf ./__pycache__",
+    "rm -rf ./.cache",
+    "rm -rf ./dist",
+    "rm -rf ./build",
+    "rm -rf ./.next",
+    "rm -rf ./coverage",
+    "rm -rf ./.pytest_cache",
+    "rm -rf target/",
+    "rm -rf vendor/",
 ]
 
 
 def log_blocked(command: str, reason: str) -> None:
+    """Log a blocked command attempt."""
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     project = os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
     entry = {
@@ -65,13 +108,16 @@ def log_blocked(command: str, reason: str) -> None:
 
 
 def is_whitelisted(command: str) -> bool:
+    """Check if command matches the whitelist."""
     cmd_stripped = command.strip()
     return any(cmd_stripped.startswith(w) for w in WHITELIST)
 
 
 def check_command(command: str) -> tuple[bool, str]:
+    """Check if a command is destructive. Returns (is_destructive, reason)."""
     if is_whitelisted(command):
         return False, ""
+
     for pattern, description in DESTRUCTIVE_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return True, description
@@ -79,6 +125,7 @@ def check_command(command: str) -> tuple[bool, str]:
 
 
 def main():
+    """Main hook entry point. Reads tool call from stdin, checks for destructive commands."""
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -94,6 +141,7 @@ def main():
         sys.exit(0)
 
     is_destructive, reason = check_command(command)
+
     if is_destructive:
         log_blocked(command, reason)
         message = (
@@ -104,6 +152,8 @@ def main():
         )
         print(json.dumps({"decision": "block", "reason": message}))
         sys.exit(0)
+
+    # Allow the command
     sys.exit(0)
 
 
