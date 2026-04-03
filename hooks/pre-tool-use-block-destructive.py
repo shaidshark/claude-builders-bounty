@@ -27,7 +27,7 @@ BLOCKED_PATTERNS = [
     # Database destruction
     (re.compile(r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b", re.IGNORECASE), "DROP TABLE/DATABASE/SCHEMA"),
     (re.compile(r"\bTRUNCATE\s+(TABLE\s+)?\w+", re.IGNORECASE), "TRUNCATE"),
-    (re.compile(r"\bDELETE\s+FROM\b(?!\s*\w+\s+WHERE\b)", re.IGNORECASE), "DELETE FROM without WHERE"),
+    (re.compile(r"\bDELETE\s+FROM\b(?!\s*\w+\s*(--\s*)?WHERE\b)", re.IGNORECASE), "DELETE FROM without WHERE"),
 
     # Git force operations
     (re.compile(r"\bgit\s+push\s+.*--force", re.IGNORECASE), "git push --force"),
@@ -41,7 +41,7 @@ BLOCKED_PATTERNS = [
     (re.compile(r"\bchmod\s+(-R\s+)?000\b", re.IGNORECASE), "chmod 000 (lock out)"),
 
     # Fork bomb
-    (re.compile(r":\(\)\{.*:\|:&\}", re.IGNORECASE), "fork bomb"),
+    (re.compile(r":\(\)\s*\{[^}]*:\|\s*&", re.IGNORECASE), "fork bomb"),
 
     # Shutdown/reboot
     (re.compile(r"\b(shutdown|reboot|poweroff|halt)\s+", re.IGNORECASE), "shutdown/reboot"),
@@ -53,6 +53,10 @@ BLOCKED_PATTERNS = [
     # Kill all
     (re.compile(r"\bkill\s+(-9\s+)?-1\b", re.IGNORECASE), "kill -1 (all processes)"),
     (re.compile(r"\bkillall\b", re.IGNORECASE), "killall"),
+
+    # Container/orchestration destruction
+    (re.compile(r"\bdocker\s+system\s+prune", re.IGNORECASE), "docker system prune"),
+    (re.compile(r"\bkubectl\s+delete\s+(namespace|cluster)", re.IGNORECASE), "kubectl delete namespace/cluster"),
 
     # Network destruction
     (re.compile(r"\biptables\s+-F\b", re.IGNORECASE), "iptables flush"),
