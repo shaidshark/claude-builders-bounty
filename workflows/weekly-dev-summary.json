@@ -1,0 +1,182 @@
+{
+  "name": "Weekly Dev Summary with Claude API",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every Monday 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/repos/{{$env.GITHUB_REPO}}/commits",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "since", "value": "={{$now.minus({days: 7}).toISO()}}"},
+            {"name": "per_page", "value": "100"}
+          ]
+        }
+      },
+      "id": "fetch-commits",
+      "name": "Fetch Weekly Commits",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/repos/{{$env.GITHUB_REPO}}/pulls",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "state", "value": "closed"},
+            {"name": "sort", "value": "updated"},
+            {"name": "direction", "value": "desc"},
+            {"name": "per_page", "value": "30"}
+          ]
+        }
+      },
+      "id": "fetch-prs",
+      "name": "Fetch Merged PRs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 200]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-data",
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [440, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const commits = $input.first().json || [];\nconst prs = $input.last().json || [];\n\n// Filter PRs merged this week\nconst oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);\nconst mergedPRs = prs.filter(pr => {\n  return pr.merged_at && new Date(pr.merged_at) >= oneWeekAgo;\n});\n\n// Group commits by author\nconst byAuthor = {};\ncommits.forEach(c => {\n  const author = c.commit?.author?.name || 'unknown';\n  if (!byAuthor[author]) byAuthor[author] = [];\n  byAuthor[author].push({\n    message: c.commit?.message?.split('\\n')[0] || '',\n    date: c.commit?.author?.date || ''\n  });\n});\n\n// Build summary input\nconst summary = {\n  week: new Date().toISOString().split('T')[0],\n  totalCommits: commits.length,\n  mergedPRs: mergedPRs.length,\n  authors: Object.keys(byAuthor).length,\n  commitsByAuthor: byAuthor,\n  prTitles: mergedPRs.map(pr => `#${pr.number}: ${pr.title}`),\n  topContributors: Object.entries(byAuthor)\n    .sort((a, b) => b[1].length - a[1].length)\n    .slice(0, 5)\n    .map(([name, c]) => ({ name, commits: c.length }))\n};\n\nreturn [{ json: summary }];"
+      },
+      "id": "process-data",
+      "name": "Process & Aggregate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "model": "claude-3-5-sonnet-20241022",
+        "options": {
+          "temperature": 0.3
+        },
+        "text": "=You are a development team summary writer. Generate a concise weekly dev summary in Markdown.\n\nData:\n{{JSON.stringify($json, null, 2)}}\n\nFormat:\n# Weekly Dev Summary - {{new Date().toISOString().split('T')[0]}}\n\n## 📊 Stats\n- Total commits: ...\n- Merged PRs: ...\n- Active contributors: ...\n\n## 🏆 Top Contributors\n...\n\n## 🔀 Merged Pull Requests\n...\n\n## 📝 Key Changes\n(Group commits by theme/feature area)\n...\n\n## 🎯 Focus Areas for Next Week\n(Based on patterns observed)\n..."
+      },
+      "id": "claude-summarize",
+      "name": "Claude API Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "x-api-key", "value": "={{$env.ANTHROPIC_API_KEY}}"},
+            {"name": "anthropic-version", "value": "2023-06-01"},
+            {"name": "content-type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 2000, messages: [{ role: 'user', content: `You are a dev summary writer. Generate a concise weekly dev summary in Markdown.\n\nData:\n${JSON.stringify($json, null, 2)}\n\nInclude: Stats, Top Contributors, Merged PRs, Key Changes grouped by theme, Focus for next week.` }] }) }}"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst content = response.content?.[0]?.text || 'No summary generated';\nreturn [{ json: { markdown: content, week: new Date().toISOString().split('T')[0] } }];"
+      },
+      "id": "extract-markdown",
+      "name": "Extract Markdown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "=Weekly Dev Summary - {{$json.week}}",
+        "content": "={{$json.markdown}}"
+      },
+      "id": "save-gist",
+      "name": "Save as GitHub Gist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/gists",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ description: `Weekly Dev Summary - ${$json.week}`, public: false, files: { [`weekly-summary-${$json.week}.md`]: { content: $json.markdown } } }) }}"
+      }
+    },
+    {
+      "parameters": {
+        "subject": "=Weekly Dev Summary - {{$json.week}}",
+        "text": "={{$json.markdown}}",
+        "additionalFields": {}
+      },
+      "id": "send-email",
+      "name": "Send via Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1320, 200]
+    }
+  ],
+  "connections": {
+    "Every Monday 9am": {
+      "main": [[{"node": "Fetch Weekly Commits", "type": "main", "index": 0}, {"node": "Fetch Merged PRs", "type": "main", "index": 0}]]
+    },
+    "Fetch Weekly Commits": {
+      "main": [[{"node": "Merge Data", "type": "main", "index": 0}]]
+    },
+    "Fetch Merged PRs": {
+      "main": [[{"node": "Merge Data", "type": "main", "index": 1}]]
+    },
+    "Merge Data": {
+      "main": [[{"node": "Process & Aggregate", "type": "main", "index": 0}]]
+    },
+    "Process & Aggregate": {
+      "main": [[{"node": "Claude API Summary", "type": "main", "index": 0}]]
+    },
+    "Claude API Summary": {
+      "main": [[{"node": "Extract Markdown", "type": "main", "index": 0}]]
+    },
+    "Extract Markdown": {
+      "main": [[{"node": "Save as GitHub Gist", "type": "main", "index": 0}, {"node": "Send via Email", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
