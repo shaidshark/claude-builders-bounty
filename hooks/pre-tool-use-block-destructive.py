@@ -67,11 +67,23 @@ BLOCKED_PATTERNS = [
 ALLOWED_PATTERNS = [
     re.compile(r"\brm\s+(-rf|-r|-f)?\s+.*\.(log|tmp|cache|pyc)\b", re.IGNORECASE),  # temp files ok
     re.compile(r"\brm\s+(-rf|-r|-f)?\s+/tmp/\S+", re.IGNORECASE),  # /tmp ok
-    re.compile(r"\brm\s+(-rf|-r|-f)?\s+node_modules\b", re.IGNORECASE),  # node_modules ok
+    re.compile(r"\brm\s+(-rf|-r|-f)?\s+(\./)?node_modules(/\S+)?\b", re.IGNORECASE),  # ./node_modules ok (explicit relative)
     re.compile(r"\bgit\s+push\s+.*--force-with-lease", re.IGNORECASE),  # force-with-lease is safer
 ]
 
 LOG_FILE = os.path.expanduser("~/.claude/hooks/blocked.log")
+
+
+# Patterns indicating shell expansion/substitution that could bypass checks
+SHELL_EXPANSION_PATTERNS = [
+    re.compile(r'\$\('),           # $(command)
+    re.compile(r'`'),              # `command`
+    re.compile(r'\$\{'),          # ${variable}
+    re.compile(r'\$[A-Za-z_]'),   # $VAR
+    re.compile(r'\|\|'),          # || chaining
+    re.compile(r'&&'),             # && chaining
+    re.compile(r';\s*\w'),       # ; command chaining
+]
 
 
 def normalize_command(cmd: str) -> str:
@@ -83,6 +95,14 @@ def normalize_command(cmd: str) -> str:
     # Normalize whitespace
     cmd = re.sub(r'\s+', ' ', cmd).strip()
     return cmd
+
+
+def has_shell_expansion(command: str) -> bool:
+    """Check if command uses shell expansion that could bypass pattern checks."""
+    for pattern in SHELL_EXPANSION_PATTERNS:
+        if pattern.search(command):
+            return True
+    return False
 
 
 def is_blocked(command: str) -> tuple[bool, str]:
@@ -134,6 +154,18 @@ def main():
         sys.exit(0)
 
     blocked, reason = is_blocked(command)
+
+    # If command has shell expansion, also check for destructive patterns in expanded form
+    if not blocked and has_shell_expansion(command):
+        # Block if shell expansion is combined with any destructive-looking command
+        for pattern, desc in BLOCKED_PATTERNS:
+            if pattern.search(command):
+                blocked = True
+                reason = f"{desc} (via shell expansion)"
+                break
+        if not blocked:
+            # Warn about shell expansion but allow
+            pass  # Shell expansion alone isn't destructive
 
     if blocked:
         log_blocked(command, reason)
