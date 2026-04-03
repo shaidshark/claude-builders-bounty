@@ -1,28 +1,11 @@
 #!/usr/bin/env python3
 """
-Pre-tool-use hook for Claude Code that blocks destructive bash commands.
+Pre-tool-use hook that blocks destructive bash commands in Claude Code.
 
-Install:
-  cp pre-tool-use-block-destructive.py ~/.claude/hooks/pre-tool-use.py
+Install: cp pre-tool-use-block-destructive.py ~/.claude/hooks/
+Make executable: chmod +x ~/.claude/hooks/pre-tool-use-block-destructive.py
 
-Then add to ~/.claude/settings.json:
-  {
-    "hooks": {
-      "PreToolUse": [
-        {
-          "matcher": "Bash",
-          "hooks": [
-            {
-              "type": "command",
-              "command": "python3 ~/.claude/hooks/pre-tool-use.py"
-            }
-          ]
-        }
-      ]
-    }
-  }
-
-Logs blocked attempts to ~/.claude/hooks/blocked.log
+Hook format: reads JSON from stdin, exits 0 to allow or 2 to block.
 """
 
 import json
@@ -30,131 +13,132 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
-LOG_FILE = Path.home() / ".claude" / "hooks" / "blocked.log"
+BLOCKED_PATTERNS = [
+    # Filesystem destruction
+    (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|-[a-zA-Z]*r[a-zA-Z]*\s+).*(?<!\s\.)\S", re.IGNORECASE), "rm with -f/-r flags on non-dot paths"),
+    (re.compile(r"\brm\s+-[a-zA-Z]*rf[a-zA-Z]*\s+", re.IGNORECASE), "rm -rf"),
+    (re.compile(r"\bmkfs\b", re.IGNORECASE), "mkfs (filesystem format)"),
+    (re.compile(r"\bdd\s+.*of=/dev/", re.IGNORECASE), "dd writing to device"),
+    (re.compile(r"\bformat\s+[A-Z]:", re.IGNORECASE), "disk format"),
+    (re.compile(r">/dev/sd[a-z]", re.IGNORECASE), "direct device write"),
+    (re.compile(r"\bshred\b", re.IGNORECASE), "shred (secure delete)"),
 
-# Destructive patterns: (regex, description)
-DESTRUCTIVE_PATTERNS = [
-    # File system destruction
-    (r"\brm\s+(?:(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+)|(?:--recursive\s+|--force\s+)+)[^\s]", "rm with recursive/force flags"),
-    (r"\brm\s+--recursive\s+--force\s+", "rm --recursive --force"),
     # Database destruction
-    (r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b", "DROP TABLE/DATABASE/SCHEMA"),
-    (r"\bTRUNCATE\s+(TABLE\s+)?[a-zA-Z_]", "TRUNCATE table"),
-    # DELETE FROM without WHERE clause
-    (r"\bDELETE\s+FROM\b(?!.*\bWHERE\b)", "DELETE FROM without WHERE clause"),
-    # Disk/format operations
-    (r"\bmkfs\b", "mkfs (format filesystem)"),
-    (r"\bdd\s+if=.*of=/dev/", "dd writing to device"),
-    (r"\bformat\s+[A-Z]:", "format drive"),
-    # System shutdown/reboot
-    (r"\b(shutdown|reboot|halt|poweroff|init\s+[06])\b", "system shutdown/reboot"),
-    # Permission escalation
-    (r"\bchmod\s+-R\s+(777|666)\s+/", "chmod -R 777/666 on root"),
-    (r"\bchown\s+-R\s+\w+\s+/", "chown -R on root path"),
+    (re.compile(r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b", re.IGNORECASE), "DROP TABLE/DATABASE/SCHEMA"),
+    (re.compile(r"\bTRUNCATE\s+(TABLE\s+)?\w+", re.IGNORECASE), "TRUNCATE"),
+    (re.compile(r"\bDELETE\s+FROM\b(?!\s*\w+\s+WHERE\b)", re.IGNORECASE), "DELETE FROM without WHERE"),
+
     # Git force operations
-    (r"\bgit\s+push\s+.*(--force(?!\s*with-lease)|-f\b)", "git push --force"),
-    (r"\bgit\s+clean\s+(-[a-zA-Z]*f|-fdx)", "git clean -f"),
-    # Docker destructive
-    (r"\bdocker\s+(system\s+)?prune\b", "docker prune"),
-    (r"\bdocker\s+rm\s+(-f|--force)", "docker rm --force"),
-    # Kubernetes destructive
-    (r"\bkubectl\s+delete\s+namespace", "kubectl delete namespace"),
-    # Package uninstall global
-    (r"\b(npm|pip)\s+uninstall\s+(-g|--global)", "global package uninstall"),
+    (re.compile(r"\bgit\s+push\s+.*--force", re.IGNORECASE), "git push --force"),
+    (re.compile(r"\bgit\s+push\s+-f\b", re.IGNORECASE), "git push -f"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE), "git reset --hard"),
+    (re.compile(r"\bgit\s+clean\s+-[a-zA-Z]*f", re.IGNORECASE), "git clean -f"),
+    (re.compile(r"\bgit\s+checkout\s+--\s*\.", re.IGNORECASE), "git checkout -- . (discard all)"),
+
+    # Permission changes
+    (re.compile(r"\bchmod\s+(-R\s+)?777\b", re.IGNORECASE), "chmod 777"),
+    (re.compile(r"\bchmod\s+(-R\s+)?000\b", re.IGNORECASE), "chmod 000 (lock out)"),
+
     # Fork bomb
-    (r":\(\)\{.*:\|:&\}", "fork bomb pattern"),
-    # Overwrite device
-    (r">\s*/dev/sd[a-z]", "overwrite block device"),
+    (re.compile(r":\(\)\{.*:\|:&\}", re.IGNORECASE), "fork bomb"),
+
+    # Shutdown/reboot
+    (re.compile(r"\b(shutdown|reboot|poweroff|halt)\s+", re.IGNORECASE), "shutdown/reboot"),
+
+    # Overwrite critical files
+    (re.compile(r">\s*/etc/(passwd|shadow|sudoers|fstab)", re.IGNORECASE), "overwriting system config"),
+    (re.compile(r">\s*/boot/", re.IGNORECASE), "overwriting boot files"),
+
+    # Kill all
+    (re.compile(r"\bkill\s+(-9\s+)?-1\b", re.IGNORECASE), "kill -1 (all processes)"),
+    (re.compile(r"\bkillall\b", re.IGNORECASE), "killall"),
+
+    # Network destruction
+    (re.compile(r"\biptables\s+-F\b", re.IGNORECASE), "iptables flush"),
+    (re.compile(r"\bip\s+(addr|link)\s+(del|flush)", re.IGNORECASE), "network interface delete"),
 ]
 
-# Allowed commands whitelist (prefix matching)
-WHITELIST = [
-    "rm -rf node_modules",
-    "rm -rf __pycache__",
-    "rm -rf .cache",
-    "rm -rf dist",
-    "rm -rf build",
-    "rm -rf .next",
-    "rm -rf .turbo",
-    "rm -rf coverage",
-    "rm -rf .pytest_cache",
-    "rm -rf ./node_modules",
-    "rm -rf ./__pycache__",
-    "rm -rf ./.cache",
-    "rm -rf ./dist",
-    "rm -rf ./build",
-    "rm -rf ./.next",
-    "rm -rf ./coverage",
-    "rm -rf ./.pytest_cache",
-    "rm -rf target/",
-    "rm -rf vendor/",
+# Patterns that are explicitly allowed (whitelist overrides)
+ALLOWED_PATTERNS = [
+    re.compile(r"\brm\s+(-rf|-r|-f)?\s+.*\.(log|tmp|cache|pyc)\b", re.IGNORECASE),  # temp files ok
+    re.compile(r"\brm\s+(-rf|-r|-f)?\s+/tmp/\S+", re.IGNORECASE),  # /tmp ok
+    re.compile(r"\brm\s+(-rf|-r|-f)?\s+node_modules\b", re.IGNORECASE),  # node_modules ok
+    re.compile(r"\bgit\s+push\s+.*--force-with-lease", re.IGNORECASE),  # force-with-lease is safer
 ]
 
-
-def log_blocked(command: str, reason: str) -> None:
-    """Log a blocked command attempt."""
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    project = os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
-    entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "command": command,
-        "reason": reason,
-        "project_path": project,
-    }
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+LOG_FILE = os.path.expanduser("~/.claude/hooks/blocked.log")
 
 
-def is_whitelisted(command: str) -> bool:
-    """Check if command matches the whitelist."""
-    cmd_stripped = command.strip()
-    return any(cmd_stripped.startswith(w) for w in WHITELIST)
+def normalize_command(cmd: str) -> str:
+    """Strip comments and decode common escape patterns."""
+    # Remove inline comments (but preserve strings)
+    cmd = re.sub(r'(?<!["\'])#[^\n]*$', '', cmd)
+    # Remove C-style comments
+    cmd = re.sub(r'/\*.*?\*/', '', cmd)
+    # Normalize whitespace
+    cmd = re.sub(r'\s+', ' ', cmd).strip()
+    return cmd
 
 
-def check_command(command: str) -> tuple[bool, str]:
-    """Check if a command is destructive. Returns (is_destructive, reason)."""
-    if is_whitelisted(command):
-        return False, ""
+def is_blocked(command: str) -> tuple[bool, str]:
+    """Check if a command should be blocked. Returns (blocked, reason)."""
+    normalized = normalize_command(command)
 
-    for pattern, description in DESTRUCTIVE_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return True, description
+    # Check whitelist first
+    for pattern in ALLOWED_PATTERNS:
+        if pattern.search(normalized):
+            return False, ""
+
+    for pattern, reason in BLOCKED_PATTERNS:
+        if pattern.search(normalized):
+            return True, reason
+
     return False, ""
 
 
+def log_blocked(command: str, reason: str):
+    """Log blocked attempt to file."""
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    project = os.getcwd()
+    log_line = f"{timestamp} | BLOCKED | reason={reason} | cmd={command.strip()} | cwd={project}\n"
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(log_line)
+
+
 def main():
-    """Main hook entry point. Reads tool call from stdin, checks for destructive commands."""
     try:
-        input_data = json.load(sys.stdin)
+        data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
-        sys.exit(0)
+        sys.exit(0)  # Can't parse, allow
 
-    tool_name = input_data.get("tool_name", "")
-    if tool_name not in ("Bash", "bash"):
-        sys.exit(0)
+    # Claude Code hooks format: check if tool is Bash
+    tool_name = data.get("tool_name", "")
+    if tool_name.lower() not in ("bash", "shell", "terminal"):
+        sys.exit(0)  # Only check bash commands
 
-    tool_input = input_data.get("tool_input", {})
-    command = tool_input.get("command", "")
+    # Extract command from tool input
+    tool_input = data.get("tool_input", {})
+    command = ""
+    if isinstance(tool_input, dict):
+        command = tool_input.get("command", "") or tool_input.get("content", "")
+    elif isinstance(tool_input, str):
+        command = tool_input
+
     if not command:
         sys.exit(0)
 
-    is_destructive, reason = check_command(command)
+    blocked, reason = is_blocked(command)
 
-    if is_destructive:
+    if blocked:
         log_blocked(command, reason)
-        message = (
-            f"⛔ Command blocked by safety hook: {reason}\n"
-            f"Command: {command}\n"
-            f"This command was identified as potentially destructive. "
-            f"If you believe this is a false positive, ask the user to run it manually."
-        )
-        print(json.dumps({"decision": "block", "reason": message}))
-        sys.exit(0)
-
-    # Allow the command
-    sys.exit(0)
+        print(f"⛔ BLOCKED: {reason}")
+        print(f"The command '{command.strip()}' was blocked to prevent accidental damage.")
+        print("If you really need to run this, please confirm with the user first.")
+        sys.exit(2)  # Exit code 2 = block
+    else:
+        sys.exit(0)  # Allow
 
 
 if __name__ == "__main__":
