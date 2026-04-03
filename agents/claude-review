@@ -79,12 +79,11 @@ def get_pr_diff(owner: str, repo: str, number: int) -> str:
     result = subprocess.run(
         ["gh", "pr", "diff", str(number), "--repo", f"{owner}/{repo}"],
         capture_output=True,
-        text=True,
         timeout=30,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to fetch diff: {result.stderr}")
-    return result.stdout
+        raise RuntimeError(f"Failed to fetch diff: {result.stderr.decode('utf-8', errors='replace')}")
+    return result.stdout.decode('utf-8', errors='replace')
 
 
 def get_pr_metadata(owner: str, repo: str, number: int) -> dict:
@@ -93,13 +92,12 @@ def get_pr_metadata(owner: str, repo: str, number: int) -> dict:
         ["gh", "pr", "view", str(number), "--repo", f"{owner}/{repo}",
          "--json", "title,additions,deletions,changedFiles,baseRefName,headRefName"],
         capture_output=True,
-        text=True,
         timeout=15,
     )
     if result.returncode != 0:
         return {}
     try:
-        return json.loads(result.stdout)
+        return json.loads(result.stdout.decode('utf-8', errors='replace'))
     except json.JSONDecodeError:
         return {}
 
@@ -258,7 +256,7 @@ def main():
         diff_text = get_pr_diff(owner, repo, number)
         metadata = get_pr_metadata(owner, repo, number)
 
-    if not diff_text.strip():
+    if not diff_text or not diff_text.strip():
         print("Error: Empty diff", file=sys.stderr)
         sys.exit(1)
 
