@@ -47,8 +47,10 @@ The workflow generates a Markdown summary including:
 
 - **Schedule**: Modify the cron expression in the schedule trigger node
 - **Delivery**: Disable unused output nodes (Email, Gist, Discord)
-- **Language**: Set `LANGUAGE` env var to `FR` for French summaries
+- **SUMMARY_LANGUAGE env var to `FR` for French summaries
 
 ## License
 
 MIT
+
+
