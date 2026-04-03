@@ -275,14 +275,14 @@ def main():
         if result.issues:
             print("### Issues")
             for i in result.issues:
-                loc = f"{i['file']}:{i['line']}" if i.get('line') else i['file']
-                print(f"- [{i['severity'].upper()}] {loc} — {i['description']}")
+                loc = f"{i.file}:{i.line}" if i.line else i.file
+                print(f"- [{i.severity.value.upper()}] {loc} — {i.description}")
         if result.suggestions:
             print("\n### Suggestions")
             for s in result.suggestions:
-                print(f"- {s['description']}")
-                if s.get('code'):
-                    print(f"  ```\n  {s['code']}\n  ```")
+                print(f"- {s.description}")
+                if s.code:
+                    print(f"  ```\n  {s.code}\n  ```")
 
 
 if __name__ == "__main__":
