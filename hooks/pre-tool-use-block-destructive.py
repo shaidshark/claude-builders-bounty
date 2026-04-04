@@ -25,8 +25,8 @@ BLOCKED_PATTERNS = [
     (re.compile(r"\bshred\b", re.IGNORECASE), "shred (secure delete)"),
 
     # Database destruction
-    (re.compile(r"\bDROP\s+(TABLE|DATABASE|SCHEMA)\b", re.IGNORECASE), "DROP TABLE/DATABASE/SCHEMA"),
-    (re.compile(r"\bTRUNCATE\s+(TABLE\s+)?\w+", re.IGNORECASE), "TRUNCATE"),
+    (re.compile(r"\bDROP\s*(TABLE|DATABASE|SCHEMA)\b", re.IGNORECASE), "DROP TABLE/DATABASE/SCHEMA"),
+    (re.compile(r"\bTRUNCATE\s*(TABLE\s+)?\w+", re.IGNORECASE), "TRUNCATE"),
     (re.compile(r"\bDELETE\s+FROM\b(?!\s*\w+\s*(--\s*)?WHERE\b)", re.IGNORECASE), "DELETE FROM without WHERE"),
 
     # Git force operations
@@ -40,8 +40,8 @@ BLOCKED_PATTERNS = [
     (re.compile(r"\bchmod\s+(-R\s+)?777\b", re.IGNORECASE), "chmod 777"),
     (re.compile(r"\bchmod\s+(-R\s+)?000\b", re.IGNORECASE), "chmod 000 (lock out)"),
 
-    # Fork bomb
-    (re.compile(r":\(\)\s*\{[^}]*:\|\s*&", re.IGNORECASE), "fork bomb"),
+    # Fork bomb (matches :(){:|:&} and variants)
+    (re.compile(r":\s*\(\s*\)\s*\{.*\|.*&", re.IGNORECASE), "fork bomb"),
 
     # Shutdown/reboot
     (re.compile(r"\b(shutdown|reboot|poweroff|halt)\s+", re.IGNORECASE), "shutdown/reboot"),
@@ -169,7 +169,8 @@ def main():
 
     if blocked:
         log_blocked(command, reason)
-        print(f"⛔ BLOCKED: {reason}")
+        # Use ASCII-safe output for Windows compatibility
+        print(f"[BLOCKED] {reason}")
         print(f"The command '{command.strip()}' was blocked to prevent accidental damage.")
         print("If you really need to run this, please confirm with the user first.")
         sys.exit(2)  # Exit code 2 = block
